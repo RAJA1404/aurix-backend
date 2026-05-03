@@ -1,4 +1,5 @@
 const { google } = require('googleapis'); // Import the official Google APIs client.
+const ytdl = require('@distube/ytdl-core'); // Import YouTube audio stream helper.
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY; // YouTube Data API v3 key from hosting environment.
 
@@ -53,7 +54,15 @@ async function getCharts(limit = 30) { // Return chart-style YouTube Music songs
 } // End getCharts.
 
 async function getSongStream(videoId) { // Return a YouTube watch URL for iframe playback.
-  return `https://www.youtube.com/watch?v=${videoId}`; // Return the YouTube watch URL.
+  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`; // Build the YouTube video URL.
+  const info = await ytdl.getInfo(videoUrl); // Fetch playable formats for this video.
+  const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' }); // Pick best audio-only format.
+
+  if (!format?.url) { // Ensure a playable audio URL exists.
+    throw new Error('Audio stream unavailable for this song.');
+  } // End missing audio format check.
+
+  return format.url; // Return direct audio stream URL for TrackPlayer.
 } // End getSongStream.
 
 async function getSongById(id) { // Keep the existing /song/:id controller working.

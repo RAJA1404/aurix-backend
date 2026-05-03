@@ -15,7 +15,7 @@ router.get('/stream', async (req, res) => { // Create GET /stream?id=VIDEO_ID fo
 
     const streamUrl = await jiosaavnService.getSongStream(id); // Get a fresh direct audio stream URL for this video ID.
 
-    return res.json({ success: true, streamUrl: streamUrl }); // Return the fresh stream URL to the app.
+    return res.redirect(streamUrl); // Redirect TrackPlayer/downloads to the fresh audio stream URL.
   } catch (error) { // Catch any stream refresh error.
     return res.status(500).json({ success: false, message: error.message }); // Return a safe JSON error response.
   } // End the try/catch block.
