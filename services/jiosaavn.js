@@ -1,82 +1,111 @@
-const { google } = require('googleapis'); // Import the official Google APIs client.
-const ytdl = require('@distube/ytdl-core'); // Import YouTube audio stream helper.
+const JIOSAAVN_BASE_URL = 'https://jiosaavn-api-production-bee1.up.railway.app/api'; // Stable JioSaavn API host.
+const ALLOWED_LANGUAGES = new Set(['tamil', 'english']); // Aurix online songs should stay Tamil + English only.
 
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY; // YouTube Data API v3 key from hosting environment.
+function pickBestUrl(downloadUrls = []) { // Pick the best playable audio URL.
+  return (
+    downloadUrls.find((item) => item.quality === '320kbps')?.url ||
+    downloadUrls.find((item) => item.quality === '160kbps')?.url ||
+    downloadUrls.find((item) => item.quality === '96kbps')?.url ||
+    downloadUrls[downloadUrls.length - 1]?.url ||
+    ''
+  );
+}
 
-if (!YOUTUBE_API_KEY) { // Fail fast if the API key is missing.
-  throw new Error('YOUTUBE_API_KEY environment variable is required.');
-} // End missing API key check.
-const youtube = google.youtube({ version: 'v3', auth: YOUTUBE_API_KEY }); // Create a YouTube Data API client.
+function pickArtwork(images = []) { // Pick the best available artwork image.
+  return (
+    images.find((item) => item.quality === '500x500')?.url ||
+    images.find((item) => item.quality === '150x150')?.url ||
+    images[images.length - 1]?.url ||
+    ''
+  );
+}
 
-function getThumbnail(snippet) { // Read the best available thumbnail URL from the YouTube snippet.
-  return snippet?.thumbnails?.high?.url || snippet?.thumbnails?.medium?.url || snippet?.thumbnails?.default?.url || '';
-} // End getThumbnail.
+function getArtistName(track) { // Join primary artist names safely.
+  return (
+    track.artists?.primary?.map((artist) => artist.name).filter(Boolean).join(', ') ||
+    track.artists?.all?.[0]?.name ||
+    'Unknown Artist'
+  );
+}
 
-function normalizeYouTubeVideo(item) { // Convert one YouTube API search result into the existing Aurix response format.
-  const videoId = item?.id?.videoId || ''; // Read the YouTube video ID.
-  const snippet = item?.snippet || {}; // Read the snippet safely.
+function normalizeJioSaavnTrack(track) { // Convert JioSaavn track to Aurix response format.
+  const streamUrl = pickBestUrl(track.downloadUrl);
 
-  if (!videoId) { // Skip results that do not contain a video ID.
-    return null; // Return null so callers can filter it out.
-  } // End missing video ID check.
+  if (!track?.id || !streamUrl) {
+    return null;
+  }
 
-  return { // Return the same shape the controllers already expect.
-    id: String(videoId), // YouTube video ID.
-    title: snippet.title || '', // Video title.
-    artist: snippet.channelTitle || 'Unknown', // Channel title as artist.
-    artwork: getThumbnail(snippet), // YouTube thumbnail URL.
-    streamUrl: `https://www.youtube.com/watch?v=${videoId}`, // YouTube watch URL for iframe player.
-    duration: 0, // Duration requires an extra videos.list call, so keep 0 for now.
-    source: 'youtube', // Mark this result as coming from YouTube.
-  }; // End normalized video object.
-} // End normalizeYouTubeVideo.
+  return {
+    id: String(track.id),
+    title: track.name || track.title || 'Unknown',
+    artist: getArtistName(track),
+    artwork: pickArtwork(track.image),
+    streamUrl,
+    duration: Number(track.duration || 0),
+    language: String(track.language || '').toLowerCase(),
+    source: 'jiosaavn',
+  };
+}
 
-async function searchYouTubeVideos(query, limit = 30) { // Search YouTube Music-category videos with the official API.
-  const response = await youtube.search.list({ // Call the YouTube Data API v3 search endpoint.
-    part: ['snippet'], // Request snippet data.
-    q: `${query} song`, // Search for songs matching the user's query.
-    type: ['video'], // Return videos only.
-    videoCategoryId: '10', // Music category.
-    maxResults: Math.min(Number(limit) || 30, 50), // YouTube API allows up to 50 results per request.
-  }); // End API call.
+async function fetchJson(url) { // Fetch JSON with a helpful error when the API fails.
+  const response = await fetch(url);
 
-  const items = response.data.items || []; // Read returned search items.
+  if (!response.ok) {
+    throw new Error(`JioSaavn API failed with ${response.status}`);
+  }
 
-  return items.map(normalizeYouTubeVideo).filter(Boolean).slice(0, limit); // Normalize and limit results.
-} // End searchYouTubeVideos.
+  return response.json();
+}
 
-async function searchSongs(query, limit = 30) { // Search YouTube and return normalized full-song results.
-  return searchYouTubeVideos(query, limit); // Return normalized YouTube song results.
-} // End searchSongs.
+function keepTamilAndEnglish(track) { // Keep only Tamil and English songs when language is known.
+  return !track.language || ALLOWED_LANGUAGES.has(track.language);
+}
 
-async function getCharts(limit = 30) { // Return chart-style YouTube Music songs.
-  return searchYouTubeVideos('tamil hits 2024 songs', limit); // Search for Tamil hit songs.
-} // End getCharts.
+async function searchSongs(query, limit = 30) { // Search JioSaavn and return normalized audio results.
+  const data = await fetchJson(
+    `${JIOSAAVN_BASE_URL}/search/songs?query=${encodeURIComponent(query)}&limit=${Math.min(Number(limit) || 30, 50)}`
+  );
+  const results = data?.data?.results || [];
 
-async function getSongStream(videoId) { // Return a YouTube watch URL for iframe playback.
-  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`; // Build the YouTube video URL.
-  const info = await ytdl.getInfo(videoUrl); // Fetch playable formats for this video.
-  const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' }); // Pick best audio-only format.
+  return results
+    .map(normalizeJioSaavnTrack)
+    .filter(Boolean)
+    .filter(keepTamilAndEnglish)
+    .slice(0, limit);
+}
 
-  if (!format?.url) { // Ensure a playable audio URL exists.
+async function getCharts(limit = 30) { // Return Tamil + English chart-style songs.
+  const chartQueries = ['tamil hits 2026', 'english hits 2026'];
+  const allResults = [];
+
+  for (const query of chartQueries) {
+    const results = await searchSongs(query, limit);
+    allResults.push(...results);
+  }
+
+  const uniqueResults = Array.from(
+    new Map(allResults.map((track) => [track.id, track])).values()
+  );
+
+  return uniqueResults.slice(0, limit);
+}
+
+async function getSongStream(songId) { // Get a fresh direct audio URL for a JioSaavn song ID.
+  const data = await fetchJson(`${JIOSAAVN_BASE_URL}/songs/${encodeURIComponent(songId)}`);
+  const song = Array.isArray(data?.data) ? data.data[0] : data?.data;
+  const normalizedSong = normalizeJioSaavnTrack(song);
+
+  if (!normalizedSong?.streamUrl) {
     throw new Error('Audio stream unavailable for this song.');
-  } // End missing audio format check.
+  }
 
-  return format.url; // Return direct audio stream URL for TrackPlayer.
-} // End getSongStream.
+  return normalizedSong.streamUrl;
+}
 
-async function getSongById(id) { // Keep the existing /song/:id controller working.
-  const streamUrl = await getSongStream(id); // Build the YouTube watch URL for the given video ID.
+async function getSongById(id) { // Keep /song/:id working.
+  const data = await fetchJson(`${JIOSAAVN_BASE_URL}/songs/${encodeURIComponent(id)}`);
+  const song = Array.isArray(data?.data) ? data.data[0] : data?.data;
+  return normalizeJioSaavnTrack(song);
+}
 
-  return { // Return the same normalized object shape.
-    id: String(id), // YouTube video ID.
-    title: '', // Title is unavailable without an extra API call.
-    artist: 'Unknown', // Artist is unavailable without an extra API call.
-    artwork: '', // Artwork is unavailable without an extra API call.
-    streamUrl: streamUrl, // YouTube watch URL.
-    duration: 0, // Duration is skipped for now.
-    source: 'youtube', // Mark this result as coming from YouTube.
-  }; // End normalized song object.
-} // End getSongById.
-
-module.exports = { searchSongs, getCharts, getSongStream, getSongById }; // Export functions used by routes and controllers.
+module.exports = { searchSongs, getCharts, getSongStream, getSongById };
